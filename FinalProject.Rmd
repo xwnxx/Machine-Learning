@@ -1,0 +1,675 @@
+---
+title: "SurvMeth 895 Final Project"
+author: "Weining Xu"
+date: "11/21/2021"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: 
+    latex_engine: xelatex
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Abstract
+
+The water quality was always a problem in worldwide. Michigan state was suffered from water crisis over years in the city, Flint. With inadequate treatment and testing of the water resulted in a series of major water quality and health issues for Flint residents—issues that were chronically ignored, overlooked, and discounted by government officials even as complaints mounted that the foul-smelling, discolored, and off-tasting water piped into Flint homes for 18 months was causing skin rashes, hair loss, and itchy skin. Water filter seems like a must-have appliance at home. Access to safe drinking-water is essential to health, a basic human right and a component of effective policy for health protection. This is important as a health and development issue at a national, regional and local level. In some regions, it has been shown that investments in water supply and sanitation can yield a net economic benefit, since the reductions in adverse health effects and health care costs outweigh the costs of undertaking the interventions. This inspired me to study on the water quality issues, and use machine learning to train different classification models and predict the water is safe to drink or not based on the water quality dataset from Kaggle. Although this is a set of data created from imaginary data of water quality in an urban environment, we can still apply the models to the real-life situation with adjustments and make predictions on the water quality afterwards.
+
+
+### Set Up
+```{r}
+library(dplyr)
+library(caret)
+library(e1071)
+library(rpart)
+library(fastAdaboost)
+library(gbm)
+library(pROC)
+```
+
+### Data Preparation
+Import data waterQuality1.csv
+```{r}
+library(readr)
+data <- read_csv("~/Downloads/UMICH/Survmeth895/Final Project/waterQuality1.csv")
+head(data)
+```
+
+check data dimension, type and missing values
+```{r}
+dim(data)
+glimpse(data)
+# 6 missing element, drop NAs
+sum(is.na(data))
+clean <- na.omit(data)
+dim(clean)
+table(clean$is_safe)
+```
+### Data Glimpse
+
+Let get a brief overview of each attributes and outcome:
+
+Aluminium - dangerous if greater than 2.8
+Ammonia - dangerous if greater than 32.5
+Arsenic - dangerous if greater than 0.01
+Barium - dangerous if greater than 2
+Cadmium - dangerous if greater than 0.005
+Chloramine - dangerous if greater than 4
+Chromium - dangerous if greater than 0.1
+Copper - dangerous if greater than 1.3
+Flouride - dangerous if greater than 1.5
+Bacteria - dangerous if greater than 0
+Viruses - dangerous if greater than 0
+Lead - dangerous if greater than 0.015
+Nitrates - dangerous if greater than 10
+Nitrites - dangerous if greater than 1
+Mercury - dangerous if greater than 0.002
+Perchlorate - dangerous if greater than 56
+Radium - dangerous if greater than 5
+Selenium - dangerous if greater than 0.5
+Silver - dangerous if greater than 0.1
+Uranium - dangerous if greater than 0.3
+is_safe - class attribute {0 - not safe, 1 - safe}
+The numbers are all in unit of level in water per liter.
+
+```{r}
+corrplot::corrplot(cor(clean[, 1:ncol(clean)-1]))
+clean$is_safe <- as.factor(clean$is_safe)
+```
+
+From the correlation plot, we can see how each attributes are related among others. Only chloramine - chromium - silver - perchlorate and bacteria - viruses are highly correlated with each other, other attributes are more likely to be independent from others.  
+
+
+Then we plot a boxplot with all the observations, and have a red point marked as the dangerous margin to see the distribution of the data in each attributes.
+```{r fig.height=10, fig.width=8, warning=FALSE}
+# put standard scale in the first row
+standard <- rbind(c(2.8, 32.5, 0.01, 2, 0.05, 4, 0.1, 1.3, 1.5, 0,0,0.015, 10,1,0.002,56,5,0.5,0.1,0.3), 
+                  clean[, 1:ncol(clean)-1])
+
+library(reshape2)
+
+ggplot(data = melt(t(standard)), aes(x=as.factor(Var1), y=value)) + 
+  geom_boxplot(aes(fill=Var1)) +
+  geom_point(data = melt(t(standard[1,])), aes(x=as.factor(Var1), y=value), color = "red")+
+  facet_wrap(~Var1, scales = "free")
+```
+From observing the boxplot, we can see that some attributes (arsenic, bacteria, viruses) data points are above the standard scale, which would affect the evaluation for water quality. Even though some attributes remain dangerous beyond the standard line, there are still 912 observations are labeled safe. Therefore, in the following models, we want to apply Decision Trees, Bagging, Random Forest, AdaBoost, Gradient Boost, and Logistic Regression to train and predict the data, and see how accurate each model performs. 
+
+### Train and test split
+We first split the data into train and test set, using seed=123. Factorize and set levels for "is_safe" attributes to not safe and safe.
+```{r}
+set.seed(123)
+
+clean$is_safe <- as.factor(clean$is_safe)
+train <- sample(1:nrow(clean), 0.8*nrow(clean))
+c_train <- clean[train,]
+c_test <- clean[-train,]
+levels(c_train$is_safe) <-c("not safe", "safe")
+```
+
+
+### Decision Tree
+First, we apply Decision Trees to train the model.
+```{r}
+tree <- rpart(make.names(is_safe) ~ ., data = c_train, method = "class")
+tree
+#summary(tree)
+```
+
+### Bagging via caret
+
+Then we implement Bagging. The `train()` function of the `caret` package can be used to call a variety of supervised learning methods and also offers a number of evaluation approaches. For this, we first specify our evaluation method.
+
+```{r}
+ctrl  <- trainControl(method = "cv",
+                      number = 5)
+```
+
+Now we can call `train()`, along with the specification of the model and the evaluation method. Return the cross-validation results.
+
+```{r}
+cbag <- train(make.names(is_safe) ~ .,
+              data = c_train,
+              method = "treebag",
+              trControl = ctrl)
+
+cbag
+```
+
+
+### Random Forests
+
+In order to also use random forests for our prediction task, we first specify a set of try-out values for model tuning. For random forest, we primarily have to care about `mtry`, i.e. the number of features to sample at each split point.
+
+```{r}
+ncols <- ncol(c_train)
+mtrys <- expand.grid(mtry = c(sqrt(ncols)-1,sqrt(ncols),sqrt(ncols)+1))
+```
+
+This object can be passed on to `train()`, along with the specification of the model, and the tuning and prediction method. Calling the random forest object lists the results of the tuning process.
+
+```{r}
+rf <- train(make.names(is_safe) ~ .,
+            data = c_train,
+            method = "rf",
+            trControl = ctrl,
+            tuneGrid = mtrys)
+
+rf
+```
+
+### AdaBoost
+
+In order to build a set of prediction models it is helpful to follow the `caret` workflow and first decide how to conduct model tuning. Here we use 5-Fold Cross-Validation, mainly to keep computation time to a minimum. `caret` offers many performance metrics, however, they are stored in different functions that need to be combined first.
+
+Now we can specifiy the `trainControl` object.
+
+```{r}
+evalStats <- function(...) c(twoClassSummary(...),
+                             defaultSummary(...),
+                             mnLogLoss(...))
+```
+
+```{r}
+ctrl  <- trainControl(method = "cv",
+                      number = 5,
+                      summaryFunction = evalStats,
+                      #verboseIter = TRUE,
+                      classProbs = TRUE)
+```
+
+As a first method we try out AdaBoost as implemented in the `fastAdaboost` package. Specifically, Adaboost.M1 will be used with three try-out values for the number of iterations.
+
+```{r}
+grid <- expand.grid(nIter = c(50, 100, 150),
+                    method = "Adaboost.M1")
+```
+
+
+Now we can pass these two objects on to `train`, along with the specification of the model and the method, i.e. `adaboost`. List the results of the tuning process.
+
+```{r}
+#set.seed(744)
+levels(c_train$is_safe) <-c("not safe", "safe")
+ada <- train(make.names(is_safe) ~.,
+             data = c_train,
+             method = "adaboost",
+             trControl = ctrl,
+             tuneGrid = grid,
+             metric = "ROC")
+
+ada
+```
+
+### GBM
+
+For Gradient Boosting as implemented by the `gbm` package, we have to take care of a number of tuning parameters. Now the `expand.grid` is helpful as it creates an object with all possible combinations of our try-out values.
+
+```{r}
+grid <- expand.grid(interaction.depth = 1:3,
+                    n.trees = c(500, 750, 1000), 
+                    shrinkage = c(0.05, 0.01),
+                    n.minobsinnode = 10)
+```
+
+List the tuning grid...
+
+```{r}
+grid
+```
+
+...and begin the tuning process.
+
+```{r}
+gbm <- train(make.names(is_safe) ~.,
+             data = c_train,
+             method = "gbm",
+             trControl = ctrl,
+             tuneGrid = grid,
+             metric = "ROC",
+             distribution = "bernoulli",
+             verbose = FALSE)
+```
+
+Instead of just printing the results from the tuning process, we can also plot them.
+
+```{r}
+plot(gbm)
+```
+### Logistic regression
+
+Finally we also add a logistic regression model. Obviously we have no tuning parameter here.
+
+```{r}
+set.seed(744)
+logit <- train(make.names(is_safe) ~.,
+             data = c_train,
+             method = "glm",
+             trControl = ctrl)
+```
+
+We may want to take a glimpse at the regression results.
+
+```{r}
+summary(logit)
+```
+
+### Prediction and Performance
+
+Finally, we predict the outcome in the test set.
+
+```{r}
+c_tree <- predict(tree, newdata = c_test, type = "class")
+c_tree <- as.factor(ifelse(c_tree=="not.safe", 0, 1))
+c_cbag <- predict(cbag, newdata = c_test)
+c_cbag <- as.factor(ifelse(c_cbag=="not.safe", 0, 1))
+c_rf <- predict(rf, newdata = c_test)
+c_rf <- as.factor(ifelse(c_rf=="not.safe", 0, 1))
+c_ada <- predict(ada, newdata = c_test)
+c_ada <- as.factor(ifelse(c_ada=="not.safe", 0, 1))
+c_gbm <- predict(gbm, newdata = c_test)
+c_gbm <- as.factor(ifelse(c_gbm=="not.safe", 0, 1))
+c_logit <- predict(logit, newdata = c_test)
+c_logit <-as.factor(ifelse(c_logit=="not.safe", 0, 1))
+
+p_tree <- predict(tree, newdata = c_test, type = "prob")
+p_cbag <- predict(cbag, newdata = c_test, type = "prob")
+p_rf <- predict(rf, newdata = c_test, type = "prob")
+p_ada <- predict(ada, newdata = c_test, type = "prob")
+p_gbm <- predict(gbm, newdata = c_test, type = "prob")
+p_logit <- predict(logit, newdata = c_test, type = "prob")
+```
+
+
+Given predicted class membership, we can use the function `postResample` in order to get a short summary of each models' performance in the test set.
+
+```{r}
+paste0("Accuracy predicted by tree: ", postResample(c_tree, c_test$is_safe)[1])
+paste0("Accuracy predicted by bagging tree: ",postResample(c_cbag, c_test$is_safe)[1])
+paste0("Accuracy predicted by random forest: ",postResample(c_rf, c_test$is_safe)[1])
+paste0("Accuracy predicted by Adaboosting: ", postResample(pred = c_ada, obs = c_test$is_safe)[1])
+paste0("Accuracy predicted by XGboosting: ", postResample(pred = c_gbm, obs = c_test$is_safe)[1])
+paste0("Accuracy predicted by Logistic Regreesion: ", postResample(pred = c_logit, obs = c_test$is_safe)[1])
+```
+### ROC Curve
+
+Creating `ROC` objects based on predicted probabilities...
+
+```{r}
+tree_roc <- roc(c_test$is_safe, p_tree[,2])
+cbag_roc <- roc(c_test$is_safe, p_cbag[,2])
+rf_roc <- roc(c_test$is_safe, p_rf[,2])
+ada_roc <- roc(c_test$is_safe, p_ada$safe)
+gbm_roc <- roc(c_test$is_safe, p_gbm$safe)
+logit_roc <- roc(c_test$is_safe, p_logit$safe)
+```
+...and plotting the ROC curves.
+
+```{r, fig.align="center"}
+ggroc(list(Tree = tree_roc,
+           BaggingTree = cbag_roc,
+           RandomForest = rf_roc,
+           Adaboost = ada_roc, 
+           GBM = gbm_roc, 
+           #CART = cart_roc, 
+           Logit = logit_roc)) +
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color="darkgrey", linetype="dashed")
+```
+From the ROC curve, we can see that models other than Decision Trees and Logistic Regression performed pretty good, since the curve are very close to the top left corner. 
+
+### Variable Importance (Method I)
+A quick look at feature importances in different models.
+
+```{r}
+plot(varImp(gbm))
+plot(varImp(rf))
+plot(varImp(cbag))
+#plot(varImp(ada))
+#plot(varImp(logit))
+#plot(varImp(tree))
+
+```
+
+### Variable Importance (Method II)
+
+Another approach for selecting features is (simple) feature screening via filtering. In this context it is important to be cautious when estimating predicting performance and correctly combine filtering and CV. The `caret` can be used to take care of that. First, we have to set up our inner (trainControl) and outer (sbfControl) evaluation techniques in Lasso variable selection.
+
+```{r}
+sbf_ctrl <- sbfControl(functions = caretSBF,
+                       method = "cv",
+                       number = 10)
+
+ctrl <- trainControl(method = "none")
+```
+
+Now we can run CV with feature selection by filter via `sbf`. 
+
+```{r}
+m3 <- sbf(is_safe ~.,
+          data = c_train,
+          method = 'glmnet',
+          sbfControl = sbf_ctrl,
+          trControl = ctrl)
+```
+
+The corresponding results object gives us an estimate of prediction performance and information on the selected features.
+
+```{r}
+m3
+```
+### After choosing variable
+We compared two ways of variables importance check, and found that aluminium, cadmium, arsenic, ammonia, barium, chloramine, and perchlorate are the most important variables among 20 features. 
+
+
+Partial dependence plots can be useful in order to see how the features are related to the outcome according to the fitted model. With the `pdp` package, we start by running the `partial()` function with the variables of interest.
+
+```{r}
+library(iml)
+library(DALEX)
+library(pdp)
+pdp1 <- partial(gbm, pred.var = "aluminium", 
+                type = "classification", 
+                which.class = 1, prob = T)
+pdp2 <- partial(rf, pred.var = "cadmium", 
+                type = "classification", 
+                which.class = 1, prob = T)
+pdp3 <- partial(rf, pred.var = "perchlorate", 
+                type = "classification", 
+                which.class = 1, prob = T)
+pdp4 <- partial(rf, pred.var = "arsenic", 
+                type = "classification", 
+                which.class = 1, prob = T)
+pdp5 <- partial(rf, pred.var = "ammonia", 
+                type = "classification", 
+                which.class = 1, prob = T)
+pdp6 <- partial(rf, pred.var = "barium", 
+                type = "classification", 
+                which.class = 1, prob = T)
+pdp7 <- partial(rf, pred.var = "chloramine", 
+                type = "classification", 
+                which.class = 1, prob = T)
+
+```
+
+### PDP Plot
+The actual plots can be created with `plotPartial()`.
+
+```{r}
+p1 <- plotPartial(pdp1, rug = T, train = c_train)
+p2 <- plotPartial(pdp2, rug = T, train = c_train)
+p3 <- plotPartial(pdp3, rug = T, train = c_train)
+p4 <- plotPartial(pdp4, rug = T, train = c_train)
+p5 <- plotPartial(pdp5, rug = T, train = c_train)
+p6 <- plotPartial(pdp6, rug = T, train = c_train)
+p7 <- plotPartial(pdp7, rug = T, train = c_train)
+
+
+grid.arrange(p1, p2, p3,p4,p5,p6,p7, ncol = 2)
+```
+
+From PDP plots, we can see that the predicted y was wider spread in aluminium and chlormine, especially when attributes' level per liter increase, the predicted results drop, which elicit the probabilities increase for the water tested not safe. Others remain small differences in predicted results, either increases when level of attributes' in water per liter also increases, or drop a litter compared with aluminium and chlormine.
+
+### ICE Plot
+Then we plot ICE plots to show how the instance’s prediction changes when a feature changes.
+```{r warning=FALSE}
+pdp1 <- partial(gbm, pred.var = "aluminium", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+pdp2 <- partial(gbm, pred.var = "cadmium", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+pdp3 <- partial(gbm, pred.var = "perchlorate", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+pdp4 <- partial(gbm, pred.var = "arsenic", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+pdp5 <- partial(gbm, pred.var = "ammonia", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+pdp6 <- partial(gbm, pred.var = "barium", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+pdp7 <- partial(gbm, pred.var = "chloramine", 
+                type = "classification", 
+                which.class = 1, prob = T, 
+                ice = TRUE, center = T)
+```
+
+```{r}
+p1 <- plotPartial(pdp1, rug = T, train = c_train, alpha = 0.1)
+p2 <- plotPartial(pdp2, rug = T, train = c_train, alpha = 0.1)
+p3 <- plotPartial(pdp3, rug = T, train = c_train, alpha = 0.1)
+p4 <- plotPartial(pdp4, rug = T, train = c_train, alpha = 0.1)
+p5 <- plotPartial(pdp5, rug = T, train = c_train, alpha = 0.1)
+p6 <- plotPartial(pdp6, rug = T, train = c_train, alpha = 0.1)
+p7 <- plotPartial(pdp7, rug = T, train = c_train, alpha = 0.1)
+
+
+grid.arrange(p1, p2, p3,p4,p5,p6,p7, ncol = 2)
+```
+
+From ICE plots, we can see that except aluminium and cadmium, the prediction remain unchanged throughout the changes in levels of other attributes in water per liter. For aluminium, the prediction decreases when level of aluminium reached 0.5. For cadmium, the prediction increases when level of aluminium reached 0.005.
+
+Therefore, we can assume that using these attributes to predict the water quality would be enough, since knowing the levels of attributes would not affect the prediction quite a lot. So we use these attributes to support our assumption.
+
+### Decision Trees
+```{r}
+tree1 <- rpart(make.names(is_safe) ~ aluminium +chloramine+barium + perchlorate + 
+                 ammonia+arsenic + cadmium, data = c_train, method = "class")
+tree1
+#summary(tree)
+```
+### Bagging via caret
+
+Although useful for demonstration purposes, we don't need to program our own loop each time to implement Bagging. The `train()` function of the `caret` package can be used to call a variety of supervised learning methods and also offers a number of evaluation approaches. For this, we first specify our evaluation method.
+
+```{r}
+ctrl  <- trainControl(method = "cv",
+                      number = 5)
+```
+
+Now we can call `train()`, along with the specification of the model and the evaluation method. Return the cross-validation results.
+
+```{r}
+cbag1 <- train(make.names(is_safe) ~ aluminium +chloramine+barium + perchlorate + ammonia+arsenic + cadmium,
+              data = c_train,
+              method = "treebag",
+              trControl = ctrl)
+
+cbag1
+```
+
+### Random Forests
+
+In order to also use random forests for our prediction task, we first specify a set of try-out values for model tuning. For random forest, we primarily have to care about `mtry`, i.e. the number of features to sample at each split point.
+
+```{r}
+ncols <- ncol(c_train)
+mtrys <- expand.grid(mtry = c(sqrt(ncols)-1,sqrt(ncols),sqrt(ncols)+1))
+```
+
+This object can be passed on to `train()`, along with the specification of the model, and the tuning and prediction method. For random forests, we use `rf`. Calling the random forest object lists the results of the tuning process.
+
+```{r}
+rf1 <- train(make.names(is_safe) ~ aluminium +chloramine+barium + perchlorate + ammonia+arsenic + cadmium,
+            data = c_train,
+            method = "rf",
+            trControl = ctrl,
+            tuneGrid = mtrys)
+
+rf1
+```
+
+### AdaBoost
+
+In order to build a set of prediction models it is helpful to follow the `caret` workflow and first decide how to conduct model tuning. Here we use 5-Fold Cross-Validation, mainly to keep computation time to a minimum. `caret` offers many performance metrics, however, they are stored in different functions that need to be combined first.
+
+Now we can specifiy the `trainControl` object.
+
+```{r}
+evalStats <- function(...) c(twoClassSummary(...),
+                             defaultSummary(...),
+                             mnLogLoss(...))
+```
+
+```{r}
+ctrl  <- trainControl(method = "cv",
+                      number = 5,
+                      summaryFunction = evalStats,
+                      #verboseIter = TRUE,
+                      classProbs = TRUE)
+```
+
+As a first method we try out AdaBoost as implemented in the `fastAdaboost` package. Specifically, Adaboost.M1 will be used with three try-out values for the number of iterations.
+
+```{r}
+grid <- expand.grid(nIter = c(50, 100, 150),
+                    method = "Adaboost.M1")
+```
+
+
+Now we can pass these two objects on to `train`, along with the specification of the model and the method, i.e. `adaboost`. List the results of the tuning process.
+
+```{r}
+#set.seed(744)
+ada1 <- train(make.names(is_safe) ~aluminium +chloramine+barium + perchlorate + ammonia+arsenic + cadmium,
+             data = c_train,
+             method = "adaboost",
+             trControl = ctrl,
+             tuneGrid = grid,
+             metric = "ROC")
+
+ada1
+```
+
+### GBM
+
+For Gradient Boosting as implemented by the `gbm` package, we have to take care of a number of tuning parameters. Now the `expand.grid` is helpful as it creates an object with all possible combinations of our try-out values.
+
+```{r}
+grid <- expand.grid(interaction.depth = 1:3,
+                    n.trees = c(500, 750, 1000), 
+                    shrinkage = c(0.05, 0.01),
+                    n.minobsinnode = 10)
+```
+
+List the tuning grid...
+
+```{r}
+grid
+```
+
+...and begin the tuning process.
+
+```{r}
+#set.seed(744)
+gbm1 <- train(make.names(is_safe) ~aluminium +chloramine+barium + perchlorate + ammonia+arsenic + cadmium,
+             data = c_train,
+             method = "gbm",
+             trControl = ctrl,
+             tuneGrid = grid,
+             metric = "ROC",
+             distribution = "bernoulli",
+             verbose = FALSE)
+```
+
+Instead of just printing the results from the tuning process, we can also plot them.
+
+```{r}
+plot(gbm1)
+```
+### Logistic regression
+
+Finally we also add a logistic regression model. Obviously we have no tuning parameter here. We may want to take a glimpse at the regression results.
+
+```{r}
+set.seed(744)
+logit1 <- train(make.names(is_safe) ~aluminium +chloramine+barium + perchlorate + ammonia+arsenic + cadmium,
+             data = c_train,
+             method = "glm",
+             trControl = ctrl)
+
+summary(logit1)
+```
+### Prediction and Performance
+Finally, we predict the outcome in the test set.
+
+```{r}
+c_tree1 <- predict(tree1, newdata = c_test, type = "class")
+c_tree1 <- as.factor(ifelse(c_tree1=="not.safe", 0, 1))
+c_cbag1 <- predict(cbag1, newdata = c_test)
+c_cbag1 <- as.factor(ifelse(c_cbag1=="not.safe", 0, 1))
+c_rf1 <- predict(rf1, newdata = c_test)
+c_rf1 <- as.factor(ifelse(c_rf1=="not.safe", 0, 1))
+c_ada1 <- predict(ada1, newdata = c_test)
+c_ada1 <- as.factor(ifelse(c_ada1=="not.safe", 0, 1))
+c_gbm1 <- predict(gbm1, newdata = c_test)
+c_gbm1 <- as.factor(ifelse(c_gbm1=="not.safe", 0, 1))
+c_logit1 <- predict(logit1, newdata = c_test)
+c_logit1 <-as.factor(ifelse(c_logit1=="not.safe", 0, 1))
+
+p_tree1 <- predict(tree1, newdata = c_test, type = "prob")
+p_cbag1 <- predict(cbag1, newdata = c_test, type = "prob")
+p_rf1 <- predict(rf1, newdata = c_test, type = "prob")
+p_ada1 <- predict(ada1, newdata = c_test, type = "prob")
+p_gbm1 <- predict(gbm1, newdata = c_test, type = "prob")
+p_logit1 <- predict(logit1, newdata = c_test, type = "prob")
+```
+
+Given predicted class membership, we can use the function `postResample` in order to get a short summary of each models' performance in the test set.
+
+```{r}
+paste0("Accuracy predicted by tree: ", postResample(c_tree1, c_test$is_safe)[1])
+paste0("Accuracy predicted by bagging tree: ",postResample(c_cbag1, c_test$is_safe)[1])
+paste0("Accuracy predicted by random forest: ",postResample(c_rf1, c_test$is_safe)[1])
+paste0("Accuracy predicted by Adaboosting: ", postResample(pred = c_ada1, obs = c_test$is_safe)[1])
+paste0("Accuracy predicted by XGboosting: ", postResample(pred = c_gbm1, obs = c_test$is_safe)[1])
+paste0("Accuracy predicted by Logistic Regreesion: ", postResample(pred = c_logit1, obs = c_test$is_safe)[1])
+```
+
+### ROC Curve
+Creating `ROC` objects based on predicted probabilities...
+
+```{r}
+tree_roc1 <- roc(c_test$is_safe, p_tree1[,2])
+cbag_roc1 <- roc(c_test$is_safe, p_cbag1$safe)
+rf_roc1 <- roc(c_test$is_safe, p_rf1$safe)
+ada_roc1 <- roc(c_test$is_safe, p_ada1$safe)
+gbm_roc1 <- roc(c_test$is_safe, p_gbm1$safe)
+logit_roc1 <- roc(c_test$is_safe, p_logit1$safe)
+```
+
+...and plotting the ROC curves. We skip Tree for its lowest accuracy score.
+
+```{r, fig.align="center"}
+ggroc(list(
+           BaggingTree = cbag_roc1,
+           RandomForest = rf_roc1,
+           Adaboost = ada_roc1, 
+           GBM = gbm_roc1, 
+           #CART = cart_roc, 
+           Logit = logit_roc1)) +
+  geom_segment(aes(x = 1, xend = 0, y = 0, yend = 1), 
+               color="darkgrey", linetype="dashed")
+```
+
+From the results above using only seven out of twenty variables, we can see that the accuracy scores do not vary much compared with previous models. Also the Bagging, Random Forest, AdaBoost and GBM performed evenly in predicting water quality in both full attributes model and selected attributes model. 
+
+
+### Conclusion
+In conclusion, we can conclude that we can predict the water quality in all models with high accuracy scores using all attributes. We can also use a few attributes to predict the water quality with relatively high accuracy scores, which would be a faster method with similar accuracy score. When we apply the models into real-life scenarios, we are sure that even we can make it faster to get the results than going over all the ingredients in the water with maintaining similar accuracy score. Although there would be some limitations in the process, for example, the data is not generated in the real world, the result could be a little bit idealistic. We can still use the structure of data processing, and model training into real-life problem. The other limitation is the data is not representative for all the water resources around the world. However, with more real data collection, we could sample a dataset that is representitive enough for prediction in the future.
+
+
+### Reference
+Data Source: Water Quality from Kaggle (https://www.kaggle.com/mssmartypants/water-quality)
